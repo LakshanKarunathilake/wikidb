@@ -112,14 +112,21 @@ class DBWikidata(DBCore):
         self.db_claims = self._env.open_db(b"db_claims", integerkey=True)
         self.db_sitelinks = self._env.open_db(b"db_sitelinks", integerkey=True)
         self.db_claim_ent_inv = self._env.open_db(b"db_claim_ent_inv")
+
+        build_trie = False
+        build_json = False
+        build_haswbstatements = False
+
         if os.path.exists(cf.DIR_WIKIDATA_ITEMS_TRIE):
             self.db_qid_trie = marisa_trie.Trie()
             self.db_qid_trie.load(cf.DIR_WIKIDATA_ITEMS_TRIE)
+            build_trie = False
         else:
             # Build wiki database
             # Will take 1-2 days
             self.db_qid_trie = None
-            self.build()
+
+        self.build(build_trie, build_json, build_haswbstatements)
 
     def get_redirect_of(self, wd_id, decode=True):
         return self._get_db_item(
@@ -535,15 +542,37 @@ class DBWikidata(DBCore):
             results = results.to_array()
         return results
 
-    def build(self):
+    def build(self, build_trie=True, build_json=True, build_haswbstatements=True):
         # 1. Build trie and redirect
-        self.build_trie_and_redirects()
+        if build_trie:
+            self.build_trie_and_redirects()
 
         # 2. Build json dump
-        self.build_from_json_dump(n_process=6)
+        if build_json:
+            self.build_from_json_dump(n_process=1)
 
         # 3. Build haswdstatement (Optional)
-        self.build_haswbstatements()
+        if build_haswbstatements:
+            self.build_haswbstatements()
+
+    def get_properties_from_connected_to_qid(self, head_qid, get_qid=True):
+        if not isinstance(head_qid, int):
+            head_qid = self.get_lid(head_qid)
+            if head_qid is None:
+                return None
+
+        results = set()
+        head_qid_key = f"{head_qid}|"
+        for key, values in self.get_iter_with_prefix(
+            self.db_claim_ent_inv, head_qid_key, bytes_value=cf.ToBytesType.INT_BITMAP
+        ):
+            print('key', values)
+            if values is not None:
+                pid = int(key.split("|")[-1])
+                results.add(pid)
+        if get_qid:
+            results = {self.get_qid(p) for p in results}
+        return results
 
     def get_properties_from_head_qid_tail_qid(self, head_qid, tail_qid, get_qid=True):
         if not isinstance(head_qid, int):
@@ -595,10 +624,12 @@ class DBWikidata(DBCore):
 
     def build_haswbstatements(self, buff_limit=cf.SIZE_512MB, step=10000):
         invert_index = defaultdict(BitMap)
-
+        print('Building haswbstatements')
+        print('total size', self.size())
         for i, head_id in enumerate(tqdm(self.keys(), total=self.size())):
-            if i and i % step == 0:
-                break
+            # if i and i % step == 0:
+            #     print('Breaking the loop')
+            #     break
 
             head_lid = self.get_lid(head_id)
             if head_lid is None or not isinstance(head_lid, int):
@@ -620,6 +651,7 @@ class DBWikidata(DBCore):
         tail_kv_list = []
         tail_k = None
         tail_v = BitMap()
+        print('inverted index', len(invert_index))
         for k, v in tqdm(invert_index, desc="Save db", total=len(invert_index)):
             tmp_k = k.split("|")[0]
             if tmp_k != tail_k:
